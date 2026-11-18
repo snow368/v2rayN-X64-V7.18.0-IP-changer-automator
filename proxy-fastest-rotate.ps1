@@ -88,18 +88,29 @@ if (-not (Test-Path -LiteralPath $GuiConfig)) { Say "FATAL: guiNConfig.json miss
 if (-not (Test-Path -LiteralPath $DbPath))    { Say "FATAL: guiNDB.db missing: $DbPath"; exit 1 }
 if (-not (Test-Path -LiteralPath $PyExe))     { Say "FATAL: python missing: $PyExe"; exit 1 }
 
-# a shared lock with the captcha-rescue script: never rotate while a rescue is
-# in progress (both kill/relaunch v2rayN -> must be mutually exclusive).
-$rescueLock = Join-Path (Split-Path -Parent $root) '_proxy_switch.lock'
+# mutual exclusion with the captcha-rescue script proxy-node-switcher.ps1:
+# both kill/relaunch v2rayN, so they must never run at the same time.
+# The rescue script does NOT write a .lock file -- it writes
+# _proxy_switch_state.json (last_switch) and logs to _proxy_switch.log.
+# Detect it via (a) a rescue switch in the last 5 min, and (b) a live rescue process.
+$engineRoot = Split-Path -Parent $root
 if (-not $Force) {
-  foreach ($lf in @($rescueLock)) {
-    if (Test-Path -LiteralPath $lf) {
-      try {
-        $la = (Get-Item -LiteralPath $lf).LastWriteTime
-        if (((Get-Date) - $la).TotalMinutes -lt 5) { Say "LOCKED: rescue script active ($lf) -> skip this tick"; exit 0 }
-      } catch { }
-    }
+  $rescueStatePath = Join-Path $engineRoot '_proxy_switch_state.json'
+  if (Test-Path -LiteralPath $rescueStatePath) {
+    try {
+      $rs = Get-Content -LiteralPath $rescueStatePath -Raw | ConvertFrom-Json
+      if ($rs.last_switch) {
+        $rl = [datetime]$rs.last_switch
+        if (((Get-Date) - $rl).TotalMinutes -lt 5) { Say "LOCKED: captcha-rescue switched $([math]::Round(((Get-Date)-$rl).TotalMinutes,1))min ago -> skip"; exit 0 }
+      }
+    } catch { }
   }
+  try {
+    $rescueProc = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.Name -match 'powershell' -and $_.CommandLine -match 'proxy-node-switcher'
+    }
+    if ($rescueProc) { Say "LOCKED: captcha-rescue process running -> skip"; exit 0 }
+  } catch { }
 }
 
 Say "===== proxy-fastest-rotate $stamp ====="
